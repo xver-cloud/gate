@@ -46,6 +46,50 @@ func Forward(
 	pc *proto.PacketContext,
 	strategyManager *StrategyManager,
 ) {
+	forward(dialTimeout, routes, log, client, handshake, pc, strategyManager)
+}
+
+// ForwardConn forwards an already-parsed handshake and the remaining raw stream.
+// Unlike Forward it does not require a full Minecraft session with codecs and
+// packet buffers. The caller must preserve any bytes read beyond the handshake
+// in conn; unbuffered handshake readers can pass the accepted TCP socket directly.
+// Authentication and all subsequent protocol bytes remain backend-owned.
+func ForwardConn(
+	ctx context.Context,
+	dialTimeout time.Duration,
+	routes []config.Route,
+	log logr.Logger,
+	conn net.Conn,
+	handshake *packet.Handshake,
+	pc *proto.PacketContext,
+	strategyManager *StrategyManager,
+) {
+	forward(dialTimeout, routes, log, &rawForwardConnection{ctx: ctx, conn: conn}, handshake, pc, strategyManager)
+}
+
+type clientConnection interface {
+	Context() context.Context
+	Close() error
+}
+
+type rawForwardConnection struct {
+	ctx  context.Context
+	conn net.Conn
+}
+
+func (c *rawForwardConnection) Context() context.Context { return c.ctx }
+func (c *rawForwardConnection) Close() error             { return c.conn.Close() }
+func (c *rawForwardConnection) Conn() net.Conn           { return c.conn }
+
+func forward(
+	dialTimeout time.Duration,
+	routes []config.Route,
+	log logr.Logger,
+	client clientConnection,
+	handshake *packet.Handshake,
+	pc *proto.PacketContext,
+	strategyManager *StrategyManager,
+) {
 	defer func() { _ = client.Close() }()
 	observation, observed := connectiontelemetry.FromContext(client.Context())
 
@@ -118,7 +162,7 @@ func tryBackends[T any](next nextBackendFunc, try func(log logr.Logger, backendA
 	}
 }
 
-func emptyReadBuff(src netmc.MinecraftConn, dst net.Conn) error {
+func emptyReadBuff(src clientConnection, dst net.Conn) error {
 	buf, ok := src.(interface{ ReadBuffered() ([]byte, error) })
 	if ok {
 		b, err := buf.ReadBuffered()
@@ -239,7 +283,7 @@ func substituteBackendParams(template string, groups []string) string {
 func findRoute(
 	routes []config.Route,
 	log logr.Logger,
-	client netmc.MinecraftConn,
+	client clientConnection,
 	handshake *packet.Handshake,
 	strategyManager *StrategyManager,
 ) (
