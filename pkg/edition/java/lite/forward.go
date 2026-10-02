@@ -94,7 +94,7 @@ func Forward(
 		observation.SetKind(connectiontelemetry.Gameplay)
 		observation.Observe(client.Context(), connectiontelemetry.Play, connectiontelemetry.Success)
 	}
-	pipe(log, src, dst)
+	pipeContext(client.Context(), log, src, dst)
 }
 
 // errAllBackendsFailed is returned when all backends failed to dial.
@@ -136,10 +136,21 @@ func emptyReadBuff(src netmc.MinecraftConn, dst net.Conn) error {
 }
 
 func pipe(log logr.Logger, src, dst net.Conn) {
+	pipeContext(context.Background(), log, src, dst)
+}
+
+func pipeContext(ctx context.Context, log logr.Logger, src, dst net.Conn) {
 	// disable deadlines
 	var zero time.Time
 	_ = src.SetDeadline(zero)
 	_ = dst.SetDeadline(zero)
+	// Closing only the client does not release a backend read after a client
+	// half-close. Cancellation owns both transports and joins both copy workers.
+	stop := context.AfterFunc(ctx, func() {
+		_ = src.Close()
+		_ = dst.Close()
+	})
+	defer stop()
 
 	type copyResult struct {
 		direction string
@@ -346,6 +357,13 @@ func dialRoute(
 		}
 	}()
 
+	// The timeout covers the complete handshake/status exchange, not only
+	// connect(2). Forward's pipe clears this deadline for established gameplay.
+	deadline, _ := dialCtx.Deadline()
+	if err = dst.SetDeadline(deadline); err != nil {
+		_ = dst.Close()
+		return nil, fmt.Errorf("set backend handshake deadline: %w", err)
+	}
 	if route.ProxyProtocol {
 		header := protoutil.ProxyHeader(srcAddr, dst.RemoteAddr())
 		if _, err = header.WriteTo(dst); err != nil {
