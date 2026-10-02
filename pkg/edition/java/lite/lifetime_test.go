@@ -12,6 +12,7 @@ import (
 	"go.minekube.com/gate/pkg/edition/java/lite/config"
 	"go.minekube.com/gate/pkg/edition/java/proto/packet"
 	"go.minekube.com/gate/pkg/gate/proto"
+	connectiontelemetry "go.minekube.com/gate/pkg/telemetry/connection"
 )
 
 func TestPipeCancellationAfterHalfClose(t *testing.T) {
@@ -63,4 +64,27 @@ func TestStatusReadBoundedByDialRouteDeadline(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("status timeout did not close backend")
 	}
+}
+
+func TestPipeReportsBackendReset(t *testing.T) {
+	client, gateClient := tcpPair(t)
+	gateBackend, backend := tcpPair(t)
+	t.Cleanup(func() { _ = client.Close(); _ = gateClient.Close(); _ = gateBackend.Close(); _ = backend.Close() })
+	collector := newLiteTelemetryCollector()
+	ctx, _ := connectiontelemetry.Start(context.Background(), collector)
+	done := make(chan struct{})
+	go func() { pipeContext(ctx, logr.Discard(), gateClient, gateBackend); close(done) }()
+	require.NoError(t, backend.(*net.TCPConn).SetLinger(0))
+	require.NoError(t, backend.Close())
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("backend reset retained the tunnel")
+	}
+	for _, event := range collector.events {
+		if event.Stage == connectiontelemetry.Closed && event.Outcome == connectiontelemetry.Failed {
+			return
+		}
+	}
+	t.Fatal("backend reset was not reported")
 }

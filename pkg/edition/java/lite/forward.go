@@ -191,6 +191,11 @@ func pipeContext(ctx context.Context, log logr.Logger, src, dst net.Conn) {
 		_ = dst.Close()
 	}
 	second := <-results
+	if ctx.Err() == nil && (first.err != nil || second.err != nil) {
+		if observation, ok := connectiontelemetry.FromContext(ctx); ok {
+			observation.Observe(ctx, connectiontelemetry.Closed, connectiontelemetry.Failed)
+		}
+	}
 	if second.err != nil {
 		_ = src.Close()
 		_ = dst.Close()
