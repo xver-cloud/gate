@@ -169,6 +169,24 @@ log:
       the new diagnostics add the backend name, address and stage plus the never-answered shape. No
       upstream behavior was ported, so the verified sync point is unchanged.
 
+  - date: 2026-10-04
+    kind: review
+    upstream_range: a7581821fb72a3eb5011f725d8876c91aa7843e1..843a47e2a38325309cd66133149fc9a984f76bb8
+    upstream_commit_count: 11
+    ported: none
+    summary: >-
+      Reviewed scoped player registries against official dev/3.0.0, whose head is unchanged
+      since the prior review. The same 11-commit range retains the prior per-commit decisions;
+      there are zero new commits. VelocityServer canRegisterConnection/registerConnection still
+      use proxy-global name and UUID maps and global online-mode policy, with no registry-scope
+      API. Its unregisterConnection removes only matching connection values, and replacement
+      registration publishes new entries without waiting for old teardown. Gate now uses the
+      same pointer-safe cleanup and atomic replacement principle while adding an opt-in opaque
+      scope with unchanged public UUID/name. Nonempty scopes honor per-connection online status;
+      the empty scope preserves existing duplicate policy. No new upstream commit was ported,
+      and the verified sync point remains unchanged. Registry scopes do not scope server catalogs
+      or authorize backend transfers; embedding applications must enforce those boundaries.
+
 ```
 
 ## The log

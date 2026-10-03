@@ -30,8 +30,8 @@ func TestRegisterConnectionUnlocksAfterDuplicate(t *testing.T) {
 			cfg.OnlineModeKickExistingPlayers = false
 			p := &Proxy{
 				cfg:         &cfg,
-				playerNames: map[string]*connectedPlayer{"player": test.existing, "first": test.existing},
-				playerIDs:   map[uuid.UUID]*connectedPlayer{test.existing.ID(): test.existing},
+				playerNames: map[scopedPlayerName]*connectedPlayer{{"", "player"}: test.existing, {"", "first"}: test.existing},
+				playerIDs:   map[scopedPlayerID]*connectedPlayer{{"", test.existing.ID()}: test.existing},
 			}
 
 			if p.registerConnection(test.candidate) {

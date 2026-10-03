@@ -149,6 +149,7 @@ func (l *initialLoginSessionHandler) handleServerLogin(login *packet.ServerLogin
 
 	e := newPreLoginEvent(l.inbound, l.login.Username, l.login.HolderID)
 	l.eventMgr.Fire(e)
+	l.inbound.registryScope = e.sealRegistryScope()
 
 	if netmc.Closed(l.conn) {
 		return // Player was disconnected

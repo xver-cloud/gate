@@ -108,6 +108,7 @@ func (a *authSessionHandler) Activated() {
 		a.inbound.IdentifiedKey(),
 		a.sessionHandlerDeps,
 	)
+	player.registryScope = a.inbound.registryScope
 	a.connectedPlayer = player
 	if !a.registrar.canRegisterConnection(player) {
 		player.Disconnect(alreadyConnected)
