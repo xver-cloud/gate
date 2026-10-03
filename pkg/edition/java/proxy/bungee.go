@@ -32,6 +32,7 @@ func newBungeeCordMessageResponder(
 type (
 	bungeeServer struct {
 		proxy *Proxy
+		scope string
 		s     RegisteredServer
 		smc   netmc.MinecraftConn
 	}
@@ -51,20 +52,23 @@ func (s *bungeeServer) PlayerCount() int {
 	if s == nil {
 		return 0
 	}
-	return s.s.Players().Len()
+	return len(s.Players())
 }
 func (s *bungeeServer) BroadcastPluginMessage(identifier message.ChannelIdentifier, data []byte) {
 	if s == nil {
 		return
 	}
-	sinks := PlayersToSlice[message.ChannelMessageSink](s.s.Players())
+	var sinks []message.ChannelMessageSink
+	for _, player := range s.Players() {
+		sinks = append(sinks, player.(message.ChannelMessageSink))
+	}
 	BroadcastPluginMessage(sinks, identifier, data)
 }
 func (s *bungeeServer) Connect(player bungeecord.Player) {
 	if s == nil {
 		return
 	}
-	p := s.proxy.Player(player.ID())
+	p := s.proxy.PlayerInScope(s.scope, player.ID())
 	if p == nil {
 		return
 	}
@@ -77,14 +81,24 @@ func (s *bungeeServer) Players() []bungeecord.Player {
 	if s == nil {
 		return nil
 	}
-	return PlayersToSlice[bungeecord.Player](s.s.Players())
+	var result []bungeecord.Player
+	s.s.Players().Range(func(player Player) bool {
+		if PlayerRegistryScope(player) == s.scope {
+			result = append(result, player)
+		}
+		return true
+	})
+	return result
 }
 
 func (s *bungeeServer) BroadcastMessage(comp component.Component) {
 	if s == nil {
 		return
 	}
-	sinks := PlayersToSlice[MessageSink](s.s.Players())
+	var sinks []MessageSink
+	for _, player := range s.Players() {
+		sinks = append(sinks, player.(MessageSink))
+	}
 	BroadcastMessage(sinks, comp)
 }
 func (s *bungeeServer) Addr() net.Addr {
@@ -113,13 +127,14 @@ func (s *bungeeServer) WritePacket(packet proto.Packet) error {
 }
 
 func (b *bungeeMessageResponderAdapter) PlayerByName(username string) bungeecord.Player {
-	return b.Proxy.PlayerByName(username)
+	return b.PlayerByNameInScope(b.player.registryScope, username)
 }
 func (b *bungeeMessageResponderAdapter) Players() []bungeecord.Player {
-	return convertSlice[bungeecord.Player](b.Proxy.Players())
+	return convertSlice[bungeecord.Player](b.PlayersInScope(b.player.registryScope))
 }
+func (b *bungeeMessageResponderAdapter) PlayerCount() int { return len(b.Players()) }
 func (b *bungeeMessageResponderAdapter) BroadcastMessage(comp component.Component) {
-	sinks := convertSlice[MessageSink](b.Proxy.Players())
+	sinks := convertSlice[MessageSink](b.PlayersInScope(b.player.registryScope))
 	BroadcastMessage(sinks, comp)
 }
 func (b *bungeeMessageResponderAdapter) Server(name string) bungeecord.Server {
@@ -129,6 +144,7 @@ func (b *bungeeMessageResponderAdapter) Server(name string) bungeecord.Server {
 	}
 	return &bungeeServer{
 		proxy: b.Proxy,
+		scope: b.player.registryScope,
 		s:     s,
 	}
 }
@@ -138,6 +154,7 @@ func (b *bungeeMessageResponderAdapter) Servers() []bungeecord.Server {
 	for i, s := range servers {
 		bungeeServers[i] = &bungeeServer{
 			proxy: b.Proxy,
+			scope: b.player.registryScope,
 			s:     s,
 		}
 	}
@@ -154,6 +171,7 @@ func (b *bungeeMessageResponderAdapter) ConnectedServer() bungeecord.ServerConne
 	}
 	return &bungeeServer{
 		proxy: b.Proxy,
+		scope: b.player.registryScope,
 		s:     server.Server(),
 		smc:   smc,
 	}

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net"
+	"sync"
 
 	"go.minekube.com/gate/pkg/edition/java/proxy/internal/resourcepack"
 	"go.minekube.com/gate/pkg/util/uuid"
@@ -244,6 +245,39 @@ type PreLoginEvent struct {
 
 	result PreLoginResult
 	reason component.Component
+
+	scopeMu       sync.Mutex
+	registryScope string
+	scopeSet      bool
+	scopeSealed   bool
+}
+
+// SetRegistryScope assigns an opaque session registry scope once, including an
+// explicit empty scope. Call synchronously from a trusted PreLoginEvent handler.
+// It returns false after an assignment or after event dispatch has completed.
+// The scope does not change the player's UUID, username, or forwarded identity.
+func (e *PreLoginEvent) SetRegistryScope(scope string) bool {
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+	if e.scopeSet || e.scopeSealed {
+		return false
+	}
+	e.registryScope, e.scopeSet = scope, true
+	return true
+}
+
+// RegistryScope returns the assigned scope, or the default empty scope.
+func (e *PreLoginEvent) RegistryScope() string {
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+	return e.registryScope
+}
+
+func (e *PreLoginEvent) sealRegistryScope() string {
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+	e.scopeSealed = true
+	return e.registryScope
 }
 
 func newPreLoginEvent(conn Inbound, username string, id uuid.UUID) *PreLoginEvent {

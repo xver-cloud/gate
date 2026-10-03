@@ -66,9 +66,9 @@ type Proxy struct {
 	servers       map[string]*registeredServer // registered backend servers: by lower case names
 	configServers map[string]bool              // tracks which servers came from config (vs API)
 
-	muP         sync.RWMutex                   // Protects following fields
-	playerNames map[string]*connectedPlayer    // lower case usernames map
-	playerIDs   map[uuid.UUID]*connectedPlayer // uuids map
+	muP         sync.RWMutex                          // Protects following fields
+	playerNames map[scopedPlayerName]*connectedPlayer // scoped lower case usernames
+	playerIDs   map[scopedPlayerID]*connectedPlayer   // scoped UUIDs
 
 	sessionIDMu      sync.Mutex
 	currentSessionID uuid.UUID
@@ -155,8 +155,8 @@ func New(options Options) (p *Proxy, err error) {
 		channelRegistrar: message.NewChannelRegistrar(),
 		servers:          map[string]*registeredServer{},
 		configServers:    map[string]bool{},
-		playerNames:      map[string]*connectedPlayer{},
-		playerIDs:        map[uuid.UUID]*connectedPlayer{},
+		playerNames:      map[scopedPlayerName]*connectedPlayer{},
+		playerIDs:        map[scopedPlayerID]*connectedPlayer{},
 		authenticator:    authn,
 		lite:             lite.NewLite(), // create lite mode functionality for this proxy instance
 		via:              newViaManagedRunner(options.Config),
@@ -698,14 +698,12 @@ func (p *Proxy) Unregister(info ServerInfo) bool {
 // DisconnectAll disconnects all current connected players
 // in parallel and waits until all players have been disconnected.
 func (p *Proxy) DisconnectAll(reason component.Component) {
-	p.muP.RLock()
-	players := p.playerIDs
-	p.muP.RUnlock()
+	players := p.Players()
 
 	var wg sync.WaitGroup
 	wg.Add(len(players))
 	for _, p := range players {
-		go func(p *connectedPlayer) {
+		go func(p Player) {
 			defer wg.Done()
 			p.Disconnect(reason)
 		}(p)
@@ -837,18 +835,19 @@ func (p *Proxy) handleConn(ctx context.Context, raw net.Conn) {
 	observation.Observe(ctx, connectiontelemetry.Closed, connectiontelemetry.ConnectionClosed)
 }
 
-// PlayerCount returns the number of players on the proxy.
+// PlayerCount returns the number of players across all registry scopes.
 func (p *Proxy) PlayerCount() int {
 	p.muP.RLock()
 	defer p.muP.RUnlock()
 	return len(p.playerIDs)
 }
 
-// Players returns all players on the proxy.
+// Players returns a snapshot of all players across all registry scopes.
+// This is an operator-wide API, not a scope-isolated player list.
 func (p *Proxy) Players() []Player {
 	p.muP.RLock()
+	defer p.muP.RUnlock()
 	playerIDs := p.playerIDs
-	p.muP.RUnlock()
 	pls := make([]Player, 0, len(playerIDs))
 	for _, player := range playerIDs {
 		pls = append(pls, player)
@@ -856,19 +855,14 @@ func (p *Proxy) Players() []Player {
 	return pls
 }
 
-// Player returns the online player by their Minecraft id.
+// Player returns the online player by their Minecraft id in the default empty scope.
 // Returns nil if the player was not found.
 func (p *Proxy) Player(id uuid.UUID) Player {
-	p.muP.RLock()
-	defer p.muP.RUnlock()
-	player, ok := p.playerIDs[id]
-	if !ok {
-		return nil // return correct nil
-	}
-	return player
+	return p.PlayerInScope("", id)
 }
 
-// PlayerByName returns the online player by their Minecraft name (search is case-insensitive).
+// PlayerByName returns the online player in the default empty scope by Minecraft
+// name (search is case-insensitive).
 // Returns nil if the player was not found.
 func (p *Proxy) PlayerByName(username string) Player {
 	player := p.playerByName(username)
@@ -878,9 +872,12 @@ func (p *Proxy) PlayerByName(username string) Player {
 	return player
 }
 func (p *Proxy) playerByName(username string) *connectedPlayer {
+	return p.playerByNameInScope("", username)
+}
+func (p *Proxy) playerByNameInScope(scope, username string) *connectedPlayer {
 	p.muP.RLock()
 	defer p.muP.RUnlock()
-	player, ok := p.playerNames[strings.ToLower(username)]
+	player, ok := p.playerNames[scopedPlayerName{scope, strings.ToLower(username)}]
 	if !ok {
 		return nil
 	}
@@ -889,67 +886,86 @@ func (p *Proxy) playerByName(username string) *connectedPlayer {
 
 func (p *Proxy) canRegisterConnection(player *connectedPlayer) bool {
 	c := p.config()
-	if c.OnlineMode && c.OnlineModeKickExistingPlayers {
+	online := c.OnlineMode
+	if player.registryScope != "" {
+		online = player.OnlineMode()
+	}
+	if online && c.OnlineModeKickExistingPlayers {
 		return true
 	}
 	lowerName := strings.ToLower(player.Username())
 	p.muP.RLock()
 	defer p.muP.RUnlock()
-	return p.playerNames[lowerName] == nil && p.playerIDs[player.ID()] == nil
+	return p.playerNames[scopedPlayerName{player.registryScope, lowerName}] == nil &&
+		p.playerIDs[scopedPlayerID{player.registryScope, player.ID()}] == nil
 }
 
 // Attempts to register the connection with the proxy.
 func (p *Proxy) registerConnection(player *connectedPlayer) bool {
 	lowerName := strings.ToLower(player.Username())
 	c := p.config()
+	nameKey := scopedPlayerName{player.registryScope, lowerName}
+	idKey := scopedPlayerID{player.registryScope, player.ID()}
+	kickExisting := c.OnlineModeKickExistingPlayers && (player.registryScope == "" || player.OnlineMode())
 
-retry:
 	p.muP.Lock()
-	if c.OnlineModeKickExistingPlayers {
-		existing, ok := p.playerIDs[player.ID()]
-		if ok {
-			// Make sure we disconnect existing duplicate
-			// player connection before we register the new one.
-			//
-			// Disconnecting the existing connection will call p.unregisterConnection in the
-			// teardown needing the p.muP.Lock() so we unlock.
-			p.muP.Unlock()
-			existing.disconnectDueToDuplicateConnection.Store(true)
-			existing.Disconnect(&component.Translation{
-				Key: "multiplayer.disconnect.duplicate_login",
-			})
-			// Now we can retry in case another duplicate connection
-			// occurred before we could acquire the lock at `retry`.
-			//
-			// Meaning we keep disconnecting incoming duplicates until
-			// we can register our connection, but this shall be uncommon anyway. :)
-			goto retry
-		}
+	var displaced *connectedPlayer
+	if kickExisting {
+		displaced = p.playerIDs[idKey]
 	} else {
-		_, exists := p.playerNames[lowerName]
+		_, exists := p.playerNames[nameKey]
 		if exists {
 			p.muP.Unlock()
 			return false
 		}
-		_, exists = p.playerIDs[player.ID()]
+		_, exists = p.playerIDs[idKey]
 		if exists {
 			p.muP.Unlock()
 			return false
 		}
 	}
 
-	p.playerIDs[player.ID()] = player
-	p.playerNames[lowerName] = player
+	// A name collision with a different UUID is never safe to overwrite in a
+	// scoped registry, even when authenticated duplicate-UUID eviction is enabled.
+	if existing := p.playerNames[nameKey]; player.registryScope != "" && existing != nil && existing != displaced {
+		p.muP.Unlock()
+		return false
+	}
+	if displaced == player {
+		p.muP.Unlock()
+		return false
+	}
+	if displaced != nil {
+		oldName := scopedPlayerName{displaced.registryScope, strings.ToLower(displaced.Username())}
+		if p.playerNames[oldName] == displaced {
+			delete(p.playerNames, oldName)
+		}
+		displaced.disconnectDueToDuplicateConnection.Store(true)
+	}
+	p.playerIDs[idKey] = player
+	p.playerNames[nameKey] = player
 	p.muP.Unlock()
+	// Publish the replacement atomically, then perform connection I/O without
+	// the registry lock. Old teardown is pointer-guarded and may finish later;
+	// waiting for it here would spin when an event handler delays cleanup.
+	if displaced != nil {
+		displaced.Disconnect(&component.Translation{Key: "multiplayer.disconnect.duplicate_login"})
+	}
 	return true
 }
 
 // unregisters a connected player
 func (p *Proxy) unregisterConnection(player *connectedPlayer) (found bool) {
 	p.muP.Lock()
-	_, found = p.playerIDs[player.ID()]
-	delete(p.playerNames, strings.ToLower(player.Username()))
-	delete(p.playerIDs, player.ID())
+	idKey := scopedPlayerID{player.registryScope, player.ID()}
+	nameKey := scopedPlayerName{player.registryScope, strings.ToLower(player.Username())}
+	found = p.playerIDs[idKey] == player
+	if found {
+		delete(p.playerIDs, idKey)
+	}
+	if p.playerNames[nameKey] == player {
+		delete(p.playerNames, nameKey)
+	}
 	empty := len(p.playerIDs) == 0
 	p.muP.Unlock()
 	if empty {

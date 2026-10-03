@@ -34,7 +34,6 @@ import (
 	"go.minekube.com/gate/pkg/edition/java/proto/state"
 	"go.minekube.com/gate/pkg/edition/java/proxy/message"
 	"go.minekube.com/gate/pkg/util/netutil"
-	"go.minekube.com/gate/pkg/util/uuid"
 )
 
 // Players is a list of players safe for concurrent use.
@@ -45,11 +44,11 @@ type Players interface {
 
 type players struct {
 	mu   sync.RWMutex // Protects following fields
-	list map[uuid.UUID]*connectedPlayer
+	list map[*connectedPlayer]struct{}
 }
 
 func newPlayers() *players {
-	return &players{list: map[uuid.UUID]*connectedPlayer{}}
+	return &players{list: map[*connectedPlayer]struct{}{}}
 }
 
 // Len returns the size of the players list
@@ -62,7 +61,10 @@ func (p *players) Len() int {
 // Range loops through the player list.
 func (p *players) Range(fn func(p Player) bool) {
 	p.mu.RLock()
-	list := p.list
+	list := make([]*connectedPlayer, 0, len(p.list))
+	for player := range p.list {
+		list = append(list, player)
+	}
 	p.mu.RUnlock()
 	for _, player := range list {
 		if !fn(player) {
@@ -87,7 +89,7 @@ func PlayersToSlice[R any](p Players) []R {
 func (p *players) add(players ...*connectedPlayer) {
 	p.mu.Lock()
 	for _, player := range players {
-		p.list[player.ID()] = player
+		p.list[player] = struct{}{}
 	}
 	p.mu.Unlock()
 }
@@ -95,7 +97,7 @@ func (p *players) add(players ...*connectedPlayer) {
 func (p *players) remove(players ...*connectedPlayer) {
 	p.mu.Lock()
 	for _, player := range players {
-		delete(p.list, player.ID())
+		delete(p.list, player)
 	}
 	p.mu.Unlock()
 }

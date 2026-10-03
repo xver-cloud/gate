@@ -58,7 +58,8 @@ type loginInboundConn struct {
 	isLoginEventFired    bool
 	onAllMessagesHandled func() error
 
-	playerKey crypto.IdentifiedKey
+	playerKey     crypto.IdentifiedKey
+	registryScope string // captured once after PreLoginEvent, before authentication
 }
 
 func newLoginInboundConn(delegate *initialInbound) *loginInboundConn {

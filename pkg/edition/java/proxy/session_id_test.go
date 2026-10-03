@@ -9,13 +9,13 @@ import (
 
 func TestProxySessionIDSharedUntilProxyEmpties(t *testing.T) {
 	p := &Proxy{
-		playerIDs: map[uuid.UUID]*connectedPlayer{},
+		playerIDs: map[scopedPlayerID]*connectedPlayer{},
 	}
 
 	first := p.sessionID()
 	require.Equal(t, first, p.sessionID())
 
-	playerID := uuid.New()
+	playerID := scopedPlayerID{"", uuid.New()}
 	p.playerIDs[playerID] = nil
 	p.resetSessionIDIfEmpty()
 	require.Equal(t, first, p.sessionID())

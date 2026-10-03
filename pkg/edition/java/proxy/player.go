@@ -136,6 +136,7 @@ type connectedPlayer struct {
 	log                 logr.Logger
 	virtualHost         net.Addr
 	onlineMode          bool
+	registryScope       string // immutable, independent of Minecraft identity and backend
 	profile             *profile.GameProfile
 	ping                atomic.Duration
 	permFunc            permission.Func
@@ -565,12 +566,11 @@ func (p *connectedPlayer) teardown() {
 	}
 
 	var status LoginStatus
-	if p.registrar.unregisterConnection(p) {
-		if p.disconnectDueToDuplicateConnection.Load() {
-			status = ConflictingLoginStatus
-		} else {
-			status = SuccessfulLoginStatus
-		}
+	registered := p.registrar.unregisterConnection(p)
+	if p.disconnectDueToDuplicateConnection.Load() {
+		status = ConflictingLoginStatus
+	} else if registered {
+		status = SuccessfulLoginStatus
 	} else {
 		if netmc.KnownDisconnect(p) {
 			status = CanceledByProxyLoginStatus
